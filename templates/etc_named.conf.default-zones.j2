@@ -1,0 +1,156 @@
+{% for acl in bind_acls %}
+acl "{{ acl.name }}" {
+{% for match in acl.match_list %}
+  {{ match }};
+{% endfor %}
+};
+
+{% endfor %}
+
+{% if bind_acls_view %}
+{% if bind_zones is defined %}
+{% for view in bind_acls %}
+view  "{{ view.name }}"  {
+
+    match-clients { {{ view.name }}; };
+    recursion yes;
+
+zone "." IN {
+        type hint;
+        file "/usr/share/dns/root.hints";
+};
+
+zone "localhost" IN {
+        type master;
+        file "/etc/bind/db.local";
+};
+
+zone "127.in-addr.arpa" IN {
+        type master;
+        file "/etc/bind/db.127";
+};
+
+zone "0.in-addr.arpa" IN {
+        type master;
+        file "/etc/bind/db.0";
+};
+
+zone "255.in-addr.arpa" IN {
+        type master;
+        file "/etc/bind/db.255";
+};
+
+{% for bind_zone in bind_zones %}
+{% if bind_zone.acl_name is not defined or bind_zone.acl_name == view.name  %}
+
+{% if bind_zone.create_forward_zones is not defined or bind_zone.create_forward_zones %}
+{# Start: set zone type  #}
+{% set _all_addresses = ansible_all_ipv4_addresses | union(ansible_all_ipv6_addresses) %}
+{% if bind_zone.type is defined and bind_zone.type == 'primary' %}
+{% set _type = 'primary' %}
+{% elif bind_zone.type is defined and bind_zone.type == 'secondary' %}
+{% set _type = 'secondary' %}
+{% elif bind_zone.type is defined and bind_zone.type == 'forward' %}
+{% set _type = 'forward' %}
+{% elif bind_zone.type is not defined and bind_zone.primaries is defined and (_all_addresses|intersect(bind_zone.primaries)|length > 0) %}
+{% set _type = 'primary' %}
+{% elif bind_zone.type is not defined and bind_zone.primaries is defined and not (_all_addresses|intersect(bind_zone.primaries)|length > 0) %}
+{% set _type = 'secondary' %}
+{% elif bind_zone.type is not defined and bind_zone.forwarders is defined %}
+{% set _type = 'forward' %}
+{% endif %}
+{# End: set zone type #}
+zone "{{ bind_zone.name }}" IN {
+{% if _type == 'primary' %}
+  type master;
+  {% if bind_zone.acl_name is not defined %}
+  file "{{ bind_zone_dir }}/{{ bind_zone.name }}";
+  {% else %}
+  file "{{ bind_zone_dir }}/{{ view.name }}/{{ bind_zone.name }}";
+  {% endif %}
+  notify yes;
+{% if bind_zone.also_notify is defined %}
+  also-notify  { {{ bind_zone.also_notify|join('; ') }}; };
+{% endif %}
+{% if bind_zone.allow_update is defined %}
+  allow-update { {{ bind_zone.allow_update|join('; ') }}; };
+{% else %}
+  allow-update { none; };
+{% endif %}
+{% elif _type == 'secondary' %}
+  type slave;
+  masters { {{ bind_zone.primaries|join('; ') }}; };
+  #file "{{ bind_secondary_dir }}/{{ bind_zone.name }}";
+{% elif _type == 'forward' %}
+  type forward;
+  forward only;
+  forwarders { {{ bind_zone.forwarders|join('; ') }}; };
+{% endif %}
+};
+{% endif %}
+{% if bind_zone.networks is defined %}
+{% if bind_zone.create_reverse_zones is not defined or bind_zone.create_reverse_zones %}
+{% for network in bind_zone.networks %}
+
+zone "{{ ('.'.join(network.replace(network+'.','').split('.')[::-1])) }}.in-addr.arpa" IN {
+{% if _type == 'primary' %}
+  type master;
+  file "{{ bind_zone_dir }}/{{ view.name }}/{{ ('.'.join(network.replace(network+'.','').split('.')[::-1])) }}.in-addr.arpa";
+  notify yes;
+{% if bind_zone.also_notify is defined %}
+  also-notify  { {{ bind_zone.also_notify|join('; ') }}; };
+{% endif %}
+{% if bind_zone.allow_update is defined %}
+  allow-update { {{ bind_zone.allow_update|join('; ') }}; };
+{% else %}
+  allow-update { none; };
+{% endif %}
+{% elif _type == 'secondary' %}
+  type slave;
+  masters { {{ bind_zone.primaries|join('; ') }}; };
+  #file "{{ bind_secondary_dir }}/{{ ('.'.join(network.replace(network+'.','').split('.')[::-1])) }}.in-addr.arpa";
+{% elif _type == 'forward' %}
+  type forward;
+  forward only;
+  forwarders { {{ bind_zone.forwarders|join('; ') }}; };
+{% endif %}
+};
+{% endfor %}
+{% endif %}
+{% endif %}
+{% if bind_zone.ipv6_networks is defined %}
+{% if bind_zone.create_reverse_zones is not defined or bind_zone.create_reverse_zones %}
+{% for network in bind_zone.ipv6_networks %}
+
+zone "{{ (network | ipaddr('revdns'))[-(9+(network|regex_replace('^.*/','')|int)//2):] }}" IN {
+{% if _type == 'primary' %}
+  type master;
+  file "{{ bind_zone_dir }}/{{ view.name }}/{{ (network | ipaddr('revdns'))[-(9+(network|regex_replace('^.*/','')|int)//2):-1] }}";
+  notify yes;
+{% if bind_zone.also_notify is defined %}
+  also-notify  { {{ bind_zone.also_notify|join('; ') }}; };
+{% endif %}
+{% if bind_zone.allow_update is defined %}
+  allow-update { {{ bind_zone.allow_update|join('; ') }}; };
+{% else %}
+  allow-update { none; };
+{% endif %}
+{% elif _type == 'secondary' %}
+  type slave;
+  masters { {{ bind_zone.primaries|join('; ') }}; };
+  #file "{{ bind_secondary_dir }}/{{ (network | ipaddr('revdns'))[-(9+(network|regex_replace('^.*/','')|int)//2):-1] }}";
+{% elif _type == 'forward' %}
+  type forward;
+  forward only;
+  forwarders { {{ bind_zone.forwarders|join('; ') }}; };
+{% endif %}
+};
+{% endfor %}
+{% endif %}
+{% endif %}
+{% endif %}
+{% endfor %}
+};
+{% endfor %}
+{% endif %}
+{% endif %}

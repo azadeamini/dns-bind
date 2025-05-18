@@ -1,0 +1,148 @@
+---
+# Initialise distribution-specific variables
+- name: Source specific variables
+  ansible.builtin.include_vars: "{{ item }}"
+  with_first_found:
+    - "{{ ansible_distribution }}-{{ ansible_distribution_major_version }}.yml"
+    - "{{ ansible_distribution }}.yml"
+    - "{{ ansible_os_family }}-{{ ansible_distribution_major_version }}.yml"
+    - "{{ ansible_os_family }}.yml"
+    - "{{ ansible_distribution_file_variety }}-{{ ansible_distribution_major_version }}.yml"
+    - "{{ ansible_distribution_file_variety }}.yml"
+  tags: bind
+
+- name: Check `primaries` or `forwarders` was set for each zone
+  ansible.builtin.assert:
+    that:
+      - item.primaries is defined or item.forwarders is defined
+    quiet: true
+  loop: "{{ bind_zones }}"
+  loop_control:
+    label: "{{ item.name }}"
+  tags: bind
+
+# Fix molecule and ci failures
+- name: Update package cache for Debian based distros
+  ansible.builtin.apt:
+    update_cache: true
+  become: true
+  changed_when: false
+  when:
+    - dns_bind_install
+    - ansible_os_family == 'Debian'
+  tags: bind
+
+- name: Assert that all XFR keys exist in the key list
+  ansible.builtin.assert:
+    that: bind_dns_keys | selectattr("name","equalto",bind_key_mapping[item]) | list | count > 0
+  loop: "{{ bind_key_mapping.keys() | list }}"
+  when: bind_key_mapping | list | count > 0
+
+- name: Install BIND
+  ansible.builtin.package:
+    pkg: "{{ item }}"
+    state: present
+  become: true
+  with_items:
+    - "{{ bind_packages }}"
+  when: dns_bind_install
+  tags: bind
+
+- name: Ensure runtime directories referenced in config exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ bind_owner }}"
+    group: "{{ bind_group }}"
+    mode: "0770"
+  become: true
+  with_items:
+    - "{{ bind_dir }}/dynamic"
+    - "{{ bind_dir }}/data"
+    - "{{ bind_zone_dir }}"
+  tags: bind
+
+- name: Ensure Directory for Cached Secondary Zones exists
+  ansible.builtin.file:
+    path: "{{ bind_secondary_dir }}"
+    state: directory
+    owner: "{{ bind_owner }}"
+    group: "{{ bind_group }}"
+    mode: "0770"
+    setype: named_cache_t
+  when: not bind_acls_view
+  become: true
+  tags: bind
+
+- name: Create serial, based on UTC UNIX time
+  ansible.builtin.command: date -u +%s
+  register: timestamp
+  changed_when: false
+  run_once: true
+  check_mode: false
+  tags: bind
+
+# file to set keys for XFR authentication
+- name: Create extra config for authenticated XFR request
+  ansible.builtin.template:
+    src: auth_transfer.j2
+    dest: "{{ bind_conf_dir }}/{{ auth_file }}"
+    mode: "0640"
+    owner: root
+    group: "{{ bind_group }}"
+  become: true
+  when: bind_dns_keys is defined and bind_dns_keys|length > 0
+  notify: reload bind
+  tags: bind
+
+- name: Configure zones
+  ansible.builtin.include_tasks: zones.yml
+  tags: bind
+
+- name: Main BIND config file if view needed
+  ansible.builtin.template:
+    src: etc_named.conf.default-zones.j2
+    dest: "{{ bind_config_default_zone }}"
+    owner: "{{ bind_owner }}"
+    group: "{{ bind_group }}"
+    mode: "0640"
+    setype: named_conf_t
+    backup: "{{ backup_named_conf }}"
+  become: true
+  notify: reload bind
+  when:
+    - dns_bind_install
+    - ansible_os_family == 'Debian'
+  tags: bind
+- name: Main BIND config file
+  ansible.builtin.template:
+    src: etc_named.conf.j2
+    dest: "{{ bind_config }}"
+    owner: "{{ bind_owner }}"
+    group: "{{ bind_group }}"
+    mode: "0640"
+    setype: named_conf_t
+    backup: "{{ backup_named_conf }}"
+    validate: named-checkconf %s
+  become: true
+  when: dns_bind_named_config
+  notify: reload bind
+  tags: bind
+
+- name: Check bind config default zone
+  ansible.builtin.command: named-checkconf {{ bind_config_default_zone }}
+  register: check_bind_config_default_zone
+  changed_when: false
+  failed_when: check_bind_config_default_zone.stderr != ''
+  when: dns_bind_named_config
+  tags: bind
+
+- name: Start BIND service
+  ansible.builtin.service:
+    name: "{{ bind_service }}"
+    state: started
+    enabled: true
+  become: true
+  when:
+    - dns_bind_install
+  tags: bind
